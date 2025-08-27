@@ -162,8 +162,12 @@ def process_image(image_path: str):
 
 def lambda_handler(event, context):
     # --- S3 input/output ---
-    input_bucket = event["input_bucket"]
-    input_key = event["input_key"]
+    record = event["Records"][0]
+    body = json.loads(record["body"])
+    s3_info = body["Records"][0]["s3"]
+
+    input_bucket = s3_info["bucket"]["name"]
+    input_key = s3_info["object"]["key"]
 
     tmp_image_path = "/tmp/input_image.jpg"
     s3.download_file(input_bucket, input_key, tmp_image_path)
@@ -248,7 +252,7 @@ Return only the JSON object "matched_products".
     s3.put_object(
         Bucket=output_bucket,
         Key=output_key,
-        Body=json.dumps(matched_json, ensure_ascii=False, indent=2),
+        Body=json.dumps(parsed_json, ensure_ascii=False, indent=2),
         ContentType="application/json"
     )
 
