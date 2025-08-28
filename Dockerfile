@@ -14,7 +14,7 @@ RUN pip install --upgrade pip
 # Install Python dependencies into Lambda task root
 RUN pip install --no-cache-dir \
     boto3 \
-    ultralytics \
+    # ultralytics \
     opencv-python-headless \
     numpy \
     Pillow \
