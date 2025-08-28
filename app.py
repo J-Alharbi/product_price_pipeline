@@ -160,6 +160,28 @@ def process_image(image_path: str):
     matched = bbox_match_products_to_prices_candidates(product_data, price_data)
     return frame, matched
 
+# ---------- Draw annotations ----------
+def draw_matches(frame, parsed_json):
+    annotated = frame.copy()
+    for product in parsed_json.get("matched_products", []):
+        # Draw product bbox
+        x1, y1, x2, y2 = product["product_bbox"]
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(annotated, "PRODUCT", (x1, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        # Draw chosen candidate (first one if exists)
+        if product.get("candidates"):
+            cand = product["candidates"][0]
+            px1, py1, px2, py2 = cand["bbox"]
+            cv2.rectangle(annotated, (px1, py1), (px2, py2), (255, 0, 0), 2)
+            label = f"{cand.get('price_value', '?')} {cand.get('currency', '')}"
+            cv2.putText(annotated, label, (px1, py1 - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+    return annotated
+
+
+
 def lambda_handler(event, context):
     # --- S3 input/output ---
     record = event["Records"][0]
@@ -239,14 +261,25 @@ Return only the JSON object "matched_products".
     if parsed_json is None:
         raise ValueError("Failed to parse JSON from LLM output")
 
-    # --- Optional: compute annotated image for internal use (not saved) ---
-    # annotated = draw_matches(frame, parsed_json)
 
     video_prefix = input_key.split("_")[0]  # e.g., "dairy4K"
     base_filename = os.path.basename(input_key).rsplit(".", 1)[0]  # strip extension
     frame_filename = f"{base_filename}.json"
     output_bucket = "video-analysis-results-1"
-    output_key = f"{video_prefix}/{frame_filename}"
+    output_key = f"{video_prefix}/json/{frame_filename}"
+
+        # --- Annotate & upload image ---
+    annotated = draw_matches(frame, parsed_json)
+    ok, encoded = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    if not ok:
+        raise RuntimeError("Failed to encode annotated image")
+    annotated_key = f"{video_prefix}/annotated/{base_filename}.jpg"
+    s3.put_object(
+        Bucket=output_bucket,
+        Key=annotated_key,
+        Body=encoded.tobytes(),
+        ContentType="image/jpeg"
+    )
 
     # --- Save result JSON to S3 ---
     s3.put_object(
