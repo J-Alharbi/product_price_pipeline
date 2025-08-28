@@ -194,9 +194,9 @@ Your task:
    - Semantic matching between product_text and price_text
    - Spatial closeness (vertical_dist, horizontal_dist, overlap_ratio)
    - Price/currency consistency
-2. Extract item_name (Use the brand name in the item name as well as info from the pricetag), brand, and unit_of_measure from the product_text.
+2. Extract item_name (Use the brand name in the item name as well as info from the pricetag), brand, and unit_of_measure (usually on price_text) from the product_text.
 3. Preserve bounding boxes.
-4. Ensure each price tag is assigned to only one product (remove duplicates).
+4. Ensure each price tag is assigned to only one product (remove duplicates), EACH PRICE TAG SHALL BE PRESENT ONCE.
 
 Input JSON: {json.dumps(matched_json, ensure_ascii=False)}
 Return only the JSON object "matched_products".
