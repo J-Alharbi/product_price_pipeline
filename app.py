@@ -131,29 +131,54 @@ def bbox_match_products_to_prices_candidates(products, prices, vertical_thresh=2
     return {"matched_products": matched}
 
 # ---------------- SageMaker Inference ----------------
-def call_sagemaker(frame_bgr):
-    _, buffer = cv2.imencode(".jpg", frame_bgr)
-    img_b64 = base64.b64encode(buffer).decode("utf-8")
+def call_sagemaker(image_path):
+    """
+    Calls the SageMaker multi-model endpoint twice: once for product detection, once for price detection.
+    Returns lists of bounding boxes for products and prices.
+    """
+    with open(image_path, "rb") as f:
+        payload = f.read()
 
-    response = sm_runtime.invoke_endpoint(
-        EndpointName=SM_ENDPOINT,
-        ContentType="application/json",
-        Body=json.dumps({"image_base64": img_b64})
+    # --- Product model ---
+    response_prod = sm_runtime.invoke_endpoint(
+        EndpointName="yolo-endpoint",
+        Body=payload,
+        ContentType="application/x-image",
+        TargetModel="product_best.pt"
     )
+    prod_result = json.loads(response_prod["Body"].read())
+    product_boxes = prod_result.get("product_boxes", [])
 
-    result = json.loads(response["Body"].read())
-    return result.get("product_boxes", []), result.get("price_boxes", [])
+    # --- Price model ---
+    response_price = sm_runtime.invoke_endpoint(
+        EndpointName="yolo-endpoint",
+        Body=payload,
+        ContentType="application/x-image",
+        TargetModel="pricetag_best.pt"
+    )
+    price_result = json.loads(response_price["Body"].read())
+    price_boxes = price_result.get("price_boxes", [])
+
+    return product_boxes, price_boxes
+
 
 def process_image(image_path: str):
     frame = cv2.imread(image_path)
     if frame is None:
         raise FileNotFoundError(f"Cannot read image at {image_path}")
 
-    # --- Call SageMaker ---
-    product_boxes, price_boxes = call_sagemaker(frame)
+    # Call SageMaker to get bounding boxes
+    product_boxes, price_boxes = call_sagemaker(image_path)
 
-    product_data = crop_and_vision(frame, product_boxes, want_price=False)
-    price_data = crop_and_vision(frame, price_boxes, want_price=True)
+    # Convert the raw boxes to dicts with bbox key for downstream processing
+    product_data = [{"bbox": b} for b in product_boxes]
+    price_data = [{"bbox": b} for b in price_boxes]
+
+    # Optionally, run your crop_and_vision to get text/price info
+    product_data = crop_and_vision(frame, product_data, want_price=False)
+    price_data = crop_and_vision(frame, price_data, want_price=True)
+
+    # Match products to prices
     matched = bbox_match_products_to_prices_candidates(product_data, price_data)
     return frame, matched
 
