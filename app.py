@@ -161,25 +161,21 @@ def process_image(image_path: str):
     return frame, matched
 
 # ---------- Draw annotations ----------
-def draw_matches(frame, parsed_json):
+def draw_matches(frame, matched):
     annotated = frame.copy()
-    for product in parsed_json.get("matched_products", []):
-        # Draw product bbox
-        x1, y1, x2, y2 = product["product_bbox"]
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(annotated, "PRODUCT", (x1, y1 - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-        # Draw chosen candidate (first one if exists)
-        if product.get("candidates"):
-            cand = product["candidates"][0]
-            px1, py1, px2, py2 = cand["bbox"]
-            cv2.rectangle(annotated, (px1, py1), (px2, py2), (255, 0, 0), 2)
-            label = f"{cand.get('price_value', '?')} {cand.get('currency', '')}"
-            cv2.putText(annotated, label, (px1, py1 - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+    for item in matched.get("matched_products", []):
+        prod_box = item.get("product_bbox")
+        tag_box = item.get("price_bbox")
+        if not prod_box or not tag_box:
+            continue  # skip if missing
+        px1, py1, px2, py2 = prod_box
+        tx1, ty1, tx2, ty2 = tag_box
+        cv2.rectangle(annotated, (px1, py1), (px2, py2), (0, 255, 0), 2)
+        cv2.rectangle(annotated, (tx1, ty1), (tx2, ty2), (0, 0, 255), 2)
+        p_center = (int((px1 + px2) / 2), int((py1 + py2) / 2))
+        t_center = (int((tx1 + tx2) / 2), int((ty1 + ty2) / 2))
+        cv2.line(annotated, p_center, t_center, (255, 0, 0), 2)
     return annotated
-
 
 
 def lambda_handler(event, context):
