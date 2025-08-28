@@ -3,35 +3,51 @@ import os
 import re
 import boto3
 import cv2
-import base64
+import numpy as np
+from ultralytics import YOLO
 from google.cloud import vision
 
 # ---------------- Config ----------------
 # Ensure /tmp exists
-os.makedirs("/tmp", exist_ok=True)
+MODELS_DIR = "/tmp/models"
+os.makedirs(MODELS_DIR, exist_ok=True)
 
 # S3 config
+MODEL_BUCKET = "model-bucket-22"
 s3 = boto3.client("s3")
 
-# Bedrock client (for LLM)
-bedrock = boto3.client("bedrock-runtime", region_name="eu-west-1")
-
-# SageMaker endpoint
-SM_ENDPOINT = "yolo-endpoint"  # replace with your endpoint
-sm_runtime = boto3.client("sagemaker-runtime", region_name="eu-west-1")
-
-# Google Vision key
+# Model paths inside Lambda
+PRODUCT_MODEL_PATH = os.path.join(MODELS_DIR, "product_best.pt")
+PRICE_MODEL_PATH = os.path.join(MODELS_DIR, "pricetag_best.pt")
 VISION_KEY_PATH = "/tmp/vision-api-key.json"
-MODEL_BUCKET = "model-bucket-22"
-s3.download_file(MODEL_BUCKET, "vision-api-key.json", VISION_KEY_PATH)
+
+
+# Download models from S3 if not already present
+def download_model_from_s3(model_name, local_path):
+    if not os.path.exists(local_path):
+        print(f"Downloading {model_name} from S3...")
+        s3.download_file(MODEL_BUCKET, model_name, local_path)
+
+download_model_from_s3("product_best.pt", PRODUCT_MODEL_PATH)
+download_model_from_s3("pricetag_best.pt", PRICE_MODEL_PATH)
+download_model_from_s3("vision-api-key.json", VISION_KEY_PATH)
+
+
+# Load YOLO models
+product_model = YOLO(PRODUCT_MODEL_PATH)
+price_model = YOLO(PRICE_MODEL_PATH)
+
+# Google Vision setup
 os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", VISION_KEY_PATH)
 vision_client = vision.ImageAnnotatorClient()
+
+# Bedrock client
+bedrock = boto3.client("bedrock-runtime", region_name="eu-west-1")
 
 # Price regex
 PRICE_REGEX = re.compile(
     r"(?i)\b(?:(SAR|SR)\s*([0-9]{1,4}(?:[.,][0-9]{1,2})?)|([0-9]{1,4}(?:[.,][0-9]{1,2})?)\s*(SAR|SR))\b"
 )
-
 # ---------------- Helpers ----------------
 def extract_price_info(lines):
     for line in lines:
@@ -66,7 +82,7 @@ def crop_and_vision(frame_bgr, boxes, want_price=False):
     if boxes is None:
         return out
     for b in boxes:
-        x1, y1, x2, y2 = map(int, b)
+        x1, y1, x2, y2 = map(int, b.xyxy[0])
         x1, y1 = max(0, x1), max(0, y1)
         x2, y2 = min(frame_bgr.shape[1], x2), min(frame_bgr.shape[0], y2)
         if x2 <= x1 or y2 <= y1:
@@ -130,59 +146,20 @@ def bbox_match_products_to_prices_candidates(products, prices, vertical_thresh=2
         })
     return {"matched_products": matched}
 
-# ---------------- SageMaker Inference ----------------
-def call_sagemaker(image_path):
-    """
-    Calls the SageMaker multi-model endpoint twice: once for product detection, once for price detection.
-    Returns lists of bounding boxes for products and prices.
-    """
-    with open(image_path, "rb") as f:
-        payload = f.read()
-
-    # --- Product model ---
-    response_prod = sm_runtime.invoke_endpoint(
-        EndpointName="yolo-endpoint",
-        Body=payload,
-        ContentType="application/x-image",
-        TargetModel="product_best.pt"
-    )
-    prod_result = json.loads(response_prod["Body"].read())
-    product_boxes = prod_result.get("product_boxes", [])
-
-    # --- Price model ---
-    response_price = sm_runtime.invoke_endpoint(
-        EndpointName="yolo-endpoint",
-        Body=payload,
-        ContentType="application/x-image",
-        TargetModel="pricetag_best.pt"
-    )
-    price_result = json.loads(response_price["Body"].read())
-    price_boxes = price_result.get("price_boxes", [])
-
-    return product_boxes, price_boxes
-
-
 def process_image(image_path: str):
+    # optimized_path = flatten_image(image_path)
     frame = cv2.imread(image_path)
     if frame is None:
         raise FileNotFoundError(f"Cannot read image at {image_path}")
-
-    # Call SageMaker to get bounding boxes
-    product_boxes, price_boxes = call_sagemaker(image_path)
-
-    # Convert the raw boxes to dicts with bbox key for downstream processing
-    product_data = [{"bbox": b} for b in product_boxes]
-    price_data = [{"bbox": b} for b in price_boxes]
-
-    # Optionally, run your crop_and_vision to get text/price info
-    product_data = crop_and_vision(frame, product_data, want_price=False)
-    price_data = crop_and_vision(frame, price_data, want_price=True)
-
-    # Match products to prices
+    product_results = product_model(image_path)
+    price_results = price_model(image_path)
+    product_boxes = product_results[0].boxes if product_results and len(product_results) else None
+    price_boxes = price_results[0].boxes if price_results and len(price_results) else None
+    product_data = crop_and_vision(frame, product_boxes, want_price=False)
+    price_data = crop_and_vision(frame, price_boxes, want_price=True)
     matched = bbox_match_products_to_prices_candidates(product_data, price_data)
     return frame, matched
 
-# ---------------- Lambda Handler ----------------
 def lambda_handler(event, context):
     # --- S3 input/output ---
     record = event["Records"][0]
@@ -217,9 +194,9 @@ Your task:
    - Semantic matching between product_text and price_text
    - Spatial closeness (vertical_dist, horizontal_dist, overlap_ratio)
    - Price/currency consistency
-2. Extract item_name, brand, and unit_of_measure from product_text.
+2. Extract item_name (Use the brand name in the item name as well as info from the pricetag), brand, and unit_of_measure from the product_text.
 3. Preserve bounding boxes.
-4. Ensure each price tag is assigned to only one product.
+4. Ensure each price tag is assigned to only one product (remove duplicates).
 
 Input JSON: {json.dumps(matched_json, ensure_ascii=False)}
 Return only the JSON object "matched_products".
@@ -262,18 +239,22 @@ Return only the JSON object "matched_products".
     if parsed_json is None:
         raise ValueError("Failed to parse JSON from LLM output")
 
-    # --- Save result JSON to S3 ---
-    video_prefix = input_key.split("/")[0]
-    base_filename = os.path.basename(input_key).rsplit(".", 1)[0]
+    # --- Optional: compute annotated image for internal use (not saved) ---
+    # annotated = draw_matches(frame, parsed_json)
+
+    video_prefix = input_key.split("_")[0]  # e.g., "dairy4K"
+    base_filename = os.path.basename(input_key).rsplit(".", 1)[0]  # strip extension
     frame_filename = f"{base_filename}.json"
     output_bucket = "video-analysis-results-1"
     output_key = f"{video_prefix}/{frame_filename}"
 
+    # --- Save result JSON to S3 ---
     s3.put_object(
         Bucket=output_bucket,
         Key=output_key,
         Body=json.dumps(parsed_json, ensure_ascii=False, indent=2),
         ContentType="application/json"
     )
+
 
     return {"status": "success", "output_key": output_key}
